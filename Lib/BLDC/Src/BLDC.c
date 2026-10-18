@@ -6,27 +6,36 @@
 #include <math.h>
 
 #define _constrain(amt, low, high) ((amt) < (low) ? (low) : ((amt) > (high) ? (high) : (amt)))//限制函数，限制amt在low和high之间
-#define BLDC_DIRECT -1                                    //电机旋转方向，1为逆时针正方向，
+#define BLDC_DIRECT_LOW -1                                    //电机旋转方向，1为逆时针正方向，
                                                           // -1为顺时针，根据实际情况修改
+#define BLDC_DIRECT_HIGH -1                                    //电机旋转方向，1为逆时针正方向，
+                                                          // -1为顺时针，根据实际情况修改
+#define LOW_MOTOR                 1     
+#define HIGH_MOTOR                2
+uint8_t BLDC_DIRECT[2] = {BLDC_DIRECT_LOW, BLDC_DIRECT_HIGH}; //电机旋转方向，1为逆时针正方向，-1为顺时针，根据实际情况修改
+
+
 #define POLE_PAIRS                7                       //极对数，根据实际电机调整
+#define PWM_TIM_LOW                   &htim1                  //PWM定时器，根据实际情况修改
+#define PWM_TIM_HIGH                  &htim2                  //PWM定时器，根据实际情况修改
+
 #define _3PI_2                    4.71238898038f          //3pi/2，电角度270度，帮助电机启动
-#define PWM_TIM                   &htim1                  //PWM定时器，根据实际情况修改
 #define PERIODCALLBACK_TIM        &htim8                  //定时器中断回调函数使用的定时器，根据实际情况修改
 #define SQRT3                     1.73205080757f          //根号3，电压变换中使用
 
-float voltage_limit =             7.0;                   //BLDC电压限制
+float voltage_limit =             10.0;                   //BLDC电压限制
 float voltage_power_supply =      12.0;                   //电源电压
 float shaft_angle =               0;                      //轴角度
-uint32_t open_loop_timestamp =    0;                      //开环时间戳
-float zero_electrical_angle =     0;                      //零电角度
+uint32_t open_loop_timestamp[2] = {0, 0};                      //开环时间戳
+float zero_electrical_angle[2] = {0, 0};                      //零电角度
 float Ualpha = 0, Ubeta =         0;                      //两相电压
 float ua = 0, ub = 0, uc =        0;                      //三相电压
 float da_a = 0, db_b = 0, dc_c =  0;                      //三相占空比
 
 float Target_Velocity = 0.0f; // 目标速度，单位为rad/s
 
-extern volatile float Angle_WithTrack;                    // 带累计的角度值
-extern volatile float Angle_WithoutTrack;                 // 不带累计的角度值
+extern volatile float Angle_WithTrack[2];                    // 带累计的角度值
+extern volatile float Angle_WithoutTrack[2];                 // 不带累计的角度值
 
 
 /**
@@ -42,9 +51,13 @@ extern volatile float Angle_WithoutTrack;                 // 不带累计的角�
 void BLDC_Init(void)
 {
     // 启动PWM
-    HAL_TIM_PWM_Start(PWM_TIM, TIM_CHANNEL_1);
-    HAL_TIM_PWM_Start(PWM_TIM, TIM_CHANNEL_2);
-    HAL_TIM_PWM_Start(PWM_TIM, TIM_CHANNEL_3);
+    HAL_TIM_PWM_Start(PWM_TIM_LOW, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(PWM_TIM_LOW, TIM_CHANNEL_2);
+    HAL_TIM_PWM_Start(PWM_TIM_LOW, TIM_CHANNEL_3);
+
+    HAL_TIM_PWM_Start(PWM_TIM_HIGH, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(PWM_TIM_HIGH, TIM_CHANNEL_2);
+    HAL_TIM_PWM_Start(PWM_TIM_HIGH, TIM_CHANNEL_3);
 
     HAL_TIM_Base_Start_IT(PERIODCALLBACK_TIM);    // 启动周期回调定时器
     char buffer[30] = {"完成电机初始化"};
@@ -52,24 +65,26 @@ void BLDC_Init(void)
                          sizeof(buffer), HAL_MAX_DELAY);
 
     HAL_Delay(1000);                             // 等待电机稳定
-    set_phase_voltage(3, 0, _3PI_2);      // 以电角度270度（即物理角度270/极对数）施加电压，帮助电机启动
+    set_phase_voltage(3, 0, _3PI_2, LOW_MOTOR);      // 以电角度270度（即物理角度270/极对数）施加电压，帮助电机启动
+    set_phase_voltage(3, 0, _3PI_2, HIGH_MOTOR);      // 以电角度270度（即物理角度270/极对数）施加电压，帮助电机启动
     HAL_Delay(3000);
-    zero_electrical_angle = _electricalangle();         // 读取当前电角度作为零电角度
-    set_phase_voltage(0, 0, _3PI_2);      // 施加0电压，停止电机
+    zero_electrical_angle[0] = _electricalangle(LOW_MOTOR);         // 读取当前电角度作为零电角度
+    zero_electrical_angle[1] = _electricalangle(HIGH_MOTOR);         // 读取当前电角度作为零电角度
+    set_phase_voltage(0, 0, _3PI_2, LOW_MOTOR);      // 施加0电压，停止电机
+    set_phase_voltage(0, 0, _3PI_2, HIGH_MOTOR);      // 施加0电压，停止电机
 }
 
-void IHM16M1_Enable(void)
+
+void BLDC_Enable(void)
 {
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_SET); //使能U
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET); //使能V
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_SET); //使能W
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_10, GPIO_PIN_SET); //使能低处电机
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_SET); //使能高处电机
 }
 
-void IHM16M1_Disable(void)
+void BLDC_Disable(void)
 {
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET); //U
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET); //V
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_15, GPIO_PIN_RESET); //W
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_10, GPIO_PIN_RESET); 
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_11, GPIO_PIN_RESET); 
 }
 
 /**
@@ -85,9 +100,15 @@ float electrical_angle(float shaft_Angle, uint8_t pole_pairs)// 计算电角度
 }
 
 
-float _electricalangle(void)
+float _electricalangle(uint8_t motor_number)
 {
-    return angle_nomalize((float)(POLE_PAIRS) * Angle_WithoutTrack - zero_electrical_angle);
+    if (motor_number < 1 || motor_number > 2)
+    {
+        return 0.0f; // 无效的电机编号，返回0
+    }
+    return angle_nomalize((float)(POLE_PAIRS) * 
+        Angle_WithoutTrack[motor_number - 1] - 
+        zero_electrical_angle[motor_number - 1]); // 计算电角度并归一化
 }
 /**
   * 函    数：电角度归一化函数
@@ -109,8 +130,9 @@ float angle_nomalize(float angle)// 角度归一化到0-2pi范围内
   * 返 回 值：无
   */
 
-void set_PWM(float Ua, float Ub, float Uc) // 设置三相电压
+void set_PWM(float Ua, float Ub, float Uc, uint8_t motor_number) // 设置三相电压
 {
+
     // 电压限制
     Ua = _constrain(Ua, 0, voltage_limit);
     Ub = _constrain(Ub, 0, voltage_limit);
@@ -123,10 +145,25 @@ void set_PWM(float Ua, float Ub, float Uc) // 设置三相电压
     dc_c = _constrain(Uc * inv_vcc, 0.0f, 1.0f);
 
     // 占空比转PWM值
-    uint32_t arr = __HAL_TIM_GET_AUTORELOAD(&htim1) + 1;
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, (uint32_t)(da_a * arr));
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, (uint32_t)(db_b * arr));
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, (uint32_t)(dc_c * arr));
+    if (motor_number == LOW_MOTOR)
+    {
+        uint32_t arr = __HAL_TIM_GET_AUTORELOAD(PWM_TIM_LOW) + 1;
+        __HAL_TIM_SET_COMPARE(PWM_TIM_LOW, TIM_CHANNEL_1, (uint32_t)(da_a * arr));
+        __HAL_TIM_SET_COMPARE(PWM_TIM_LOW, TIM_CHANNEL_2, (uint32_t)(db_b * arr));
+        __HAL_TIM_SET_COMPARE(PWM_TIM_LOW, TIM_CHANNEL_3, (uint32_t)(dc_c * arr));
+    }
+    else if (motor_number == HIGH_MOTOR)
+    {
+        uint32_t arr = __HAL_TIM_GET_AUTORELOAD(PWM_TIM_HIGH) + 1;
+        __HAL_TIM_SET_COMPARE(PWM_TIM_HIGH, TIM_CHANNEL_1, (uint32_t)(da_a * arr));
+        __HAL_TIM_SET_COMPARE(PWM_TIM_HIGH, TIM_CHANNEL_2, (uint32_t)(db_b * arr));
+        __HAL_TIM_SET_COMPARE(PWM_TIM_HIGH, TIM_CHANNEL_3, (uint32_t)(dc_c * arr));
+    }
+    else
+    {
+        // 无效的电机编号，直接返回
+        return;
+    }
 }
 
 /**
@@ -137,9 +174,13 @@ void set_PWM(float Ua, float Ub, float Uc) // 设置三相电压
   * 返 回 值：无
   */
 
-void set_phase_voltage(float Uq, float Ud, float Angle)
+void set_phase_voltage(float Uq, float Ud, float Angle, uint8_t motor) // 设置相电压
 {
-    Angle = angle_nomalize(Angle + zero_electrical_angle); // 计算电角度并归一化
+    if (motor < 1 || motor > 2)
+    {
+        return; // 无效的电机编号，直接返回
+    }
+    Angle = angle_nomalize(Angle + zero_electrical_angle[motor - 1]); // 计算电角度并归一化
     
     float sin_a = sinf(Angle);
     float cos_a = cosf(Angle);
@@ -158,7 +199,7 @@ void set_phase_voltage(float Uq, float Ud, float Angle)
     uc = -Ubeta_sqrt3_half - Ualpha_half + half_vcc;
 
     // 设置PWM
-    set_PWM(ua, ub, uc);//随便写测试git的注释
+    set_PWM(ua, ub, uc, motor); 
 }
 
  /**
@@ -168,21 +209,25 @@ void set_phase_voltage(float Uq, float Ud, float Angle)
    * 参    数：极对数
    * 返 回 值：当前电压，主要用于调试
    */
- float velocity_open_loop(float target_velocity)
+ float velocity_open_loop(float target_velocity, uint8_t motor_number)
  {
+     if (motor_number < 1 || motor_number > 2)
+     {
+         return 0.0f; // 无效的电机编号，返回0
+     }
      uint32_t current_time = HAL_GetTick(); // 获取当前时间（单位：ms）
-     float dt = (current_time - open_loop_timestamp) * 0.001f; // 计算时间差（单位：s）
+     float dt = (current_time - open_loop_timestamp[motor_number - 1]) * 0.001f; // 计算时间差（单位：s）
  
      // 仅当时间有变化时才更新角度和时间戳
      if (dt > 0.0f)
      {
-         shaft_angle = angle_nomalize(shaft_angle + target_velocity * dt); // 更新轴角度，target_velocity单位为rad/s
-         open_loop_timestamp = current_time; // 更新时间戳
+        shaft_angle = angle_nomalize(shaft_angle + target_velocity * dt); // 更新轴角度，target_velocity单位为rad/s
+        open_loop_timestamp[motor_number - 1] = current_time; // 更新时间戳
      }
  
      float Uq = voltage_limit; // 开环时直接使用最大电压
      float Ud = 0; // d轴电压为0
-     set_phase_voltage(Uq, Ud, electrical_angle(shaft_angle, POLE_PAIRS)); // 设置相电压
+     set_phase_voltage(Uq, Ud, electrical_angle(shaft_angle, POLE_PAIRS), motor_number); // 设置相电压
      // 返回当前电压，主要用于调试
      return Uq;
 }
@@ -195,10 +240,10 @@ void set_phase_voltage(float Uq, float Ud, float Angle)
    * 参    数：无
    * 返 回 值：无
    */
-float Kd_Last_Angle1 = 0.0f;
-float Error0 = 0.0f;
-float Error1 = 0.0f;
-float DifOut = 0.0f;
+float Kd_Last_Angle1[2] = {0.0f, 0.0f}; // 上一次的角度值，用于计算角速度
+float Error0[2] = {0.0f, 0.0f};
+float Error1[2] = {0.0f, 0.0f};
+float DifOut[2] = {0.0f, 0.0f};
 float a = 0.5f;
 // 使用注意事项：定位控制的结构是主循环不断调用AS5600_Measure()函数更新角度值，
 // 定时器3周期性调用Set_TarAngle()函数进行位置控制，目标角度可以根据需要修改，
@@ -207,46 +252,55 @@ float a = 0.5f;
 // AS5600采用DMA方式读取数据，确保在使用过程中DMA传输正常工作，以避免数据丢失或更新不及时的问题。
 // 代码结构大概是：主循环不断调用AS5600_Measure()函数更新角度值，回调函数内部处理数据。
 // 定时器3周期性调用Set_TarAngle()函数进行位置控制
-void Set_TarAngle(float Target_Angle)//角度输入范围：0-2pi，单位为rad
+void Set_TarAngle(float Target_Angle, uint8_t motor_number)//角度输入范围：0-2pi，单位为rad
 {
-  
-  float Sensor_Angle = Angle_WithTrack;
+  if (motor_number < 1 || motor_number > 2)
+  {
+      return; // 无效的电机编号，直接返回
+  }
+  float Sensor_Angle = Angle_WithTrack[motor_number - 1]; // 获取当前角度值
   const float kp = 0.133f;
   const float kd = 0.05f;
   const float rad_to_deg = 180.0f / (float)M_PI;
-  Error1 = Error0;
-  Error0 = Target_Angle - Sensor_Angle;
-  DifOut = kd * a * (Error0 - Error1) + (1.0f - a) * DifOut; 
-  float Uq1 = BLDC_DIRECT * _constrain((kp * Error0 + DifOut) * rad_to_deg, -6.0f, 6.0f);
-  set_phase_voltage(Uq1, 0, _electricalangle());
-  Kd_Last_Angle1 = Sensor_Angle;
+  Error1[motor_number - 1] = Error0[motor_number - 1];
+  Error0[motor_number - 1] = Target_Angle - Sensor_Angle;
+  DifOut[motor_number - 1] = kd * a * (Error0[motor_number - 1] - Error1[motor_number - 1]) + 
+                                  (1.0f - a) * DifOut[motor_number - 1];
+  float Uq1 = BLDC_DIRECT[motor_number - 1] * _constrain((kp * Error0[motor_number - 1] + DifOut[motor_number - 1]) * rad_to_deg, -6.0f, 6.0f);
+  set_phase_voltage(Uq1, 0, _electricalangle(motor_number), motor_number);
+  Kd_Last_Angle1[motor_number - 1] = Sensor_Angle;
+
 }
   
-void Set_TarVelocity(float Target_Velocity)
+void Set_TarVelocity(float Target_Velocity, uint8_t motor_number)
 {
-  static float interror = 0.0f;
-  static float Last_Error = 0.0f;
-  static uint32_t time_last = 0;
+  if (motor_number < 1 || motor_number > 2)
+  {
+      return; // 无效的电机编号，直接返回
+  }
+  static float interror[2] = {0.0f, 0.0f};
+  static float Last_Error[2] = {0.0f, 0.0f};
+  static uint32_t time_last[2] = {0, 0};
   const float kp = 0.2f;
   const float ki = 0.15f;
 
   uint32_t current_time = HAL_GetTick();
-  if (time_last == 0) {
-      time_last = current_time;
+  if (time_last[motor_number - 1] == 0) {
+      time_last[motor_number - 1] = current_time;
   }
-  float dt = (current_time - time_last) * 0.001f; // 计算时间差（单位：s）
-  time_last = current_time; // 更新时间戳
+  float dt = (current_time - time_last[motor_number - 1]) * 0.001f; // 计算时间差（单位：s）
+  time_last[motor_number - 1] = current_time; // 更新时间戳
 
-  float Error = Target_Velocity - AS5600_Get_FliteredVelocity();
+  float Error = Target_Velocity - AS5600_Get_FliteredVelocity(motor_number); // 计算速度误差
   
   if (dt > 0.0f) {
-      interror += 0.5f * (Error + Last_Error) * dt;
-      interror = _constrain(interror, -100.0f, 100.0f); // 积分限幅，防止积分过大导致控制不稳定
+      interror[motor_number - 1] += 0.5f * (Error + Last_Error[motor_number - 1]) * dt;
+      interror[motor_number - 1] = _constrain(interror[motor_number - 1], -100.0f, 100.0f); // 积分限幅，防止积分过大导致控制不稳定
   }
   
-  Last_Error = Error;
-  float Uq = BLDC_DIRECT * _constrain(kp * Error + ki * interror, -voltage_limit / 2.0f, voltage_limit / 2.0f);
-  set_phase_voltage(Uq, 0, _electricalangle());
+  Last_Error[motor_number - 1] = Error;
+  float Uq = BLDC_DIRECT[motor_number - 1] * _constrain(kp * Error + ki * interror[motor_number - 1], -voltage_limit / 2.0f, voltage_limit / 2.0f);
+  set_phase_voltage(Uq, 0, _electricalangle(motor_number), motor_number);
 }
 
 
@@ -265,8 +319,8 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   {
     i++; // 用于调试，记录定时器中断的次数
     // AS5600_Measure();                   // 定时器8溢出时调用测量函数更新角度值，确保位置控制使用的是最新的角度数据
-    Set_TarVelocity(50);      // 定时器8溢出时调用速度控制函数，目标速度为10 rad/s，根据需要修改
-    // Set_TarAngle(1);      // 定时器8溢出时调用位置控制函数，目标角度为0
+    Set_TarVelocity(50, 1);      // 定时器8溢出时调用速度控制函数，目标速度为10 rad/s，根据需要修改
+    // Set_TarAngle(1, 1);      // 定时器8溢出时调用位置控制函数，目标角度为0
     
   }
 }
